@@ -1,0 +1,116 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  EventBridge Schedule to API Gateway
+  
+  This pattern demonstrates how to use an EventBridge scheduled rule to invoke 
+  an API Gateway REST API endpoint on a recurring schedule.
+
+Globals:
+  Function:
+    Timeout: 30
+    Runtime: python3.12
+    Architectures:
+      - x86_64
+
+Resources:
+  # Lambda function behind API Gateway
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: app.lambda_handler
+      Description: Lambda function invoked by API Gateway
+      Environment:
+        Variables:
+          LOG_LEVEL: INFO
+      Events:
+        PostEvent:
+          Type: Api
+          Properties:
+            Path: /process
+            Method: post
+            RestApiId: !Ref ApiGateway
+
+  # API Gateway REST API
+  ApiGateway:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: prod
+      Description: API Gateway invoked by EventBridge scheduled rule
+
+  # IAM Role for EventBridge to invoke API Gateway
+  EventBridgeApiRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeApiGateway
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - execute-api:Invoke
+                Resource: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/prod/POST/process'
+
+  # EventBridge Scheduled Rule targeting API Gateway
+  ScheduledRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${AWS::StackName}-schedule'
+      Description: Invokes API Gateway endpoint every 5 minutes
+      ScheduleExpression: rate(5 minutes)
+      State: ENABLED
+      Targets:
+        - Id: ApiGatewayTarget
+          Arn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/prod/POST/process'
+          RoleArn: !GetAtt EventBridgeApiRole.Arn
+          InputTransformer:
+            InputPathsMap:
+              time: $.time
+              source: $.source
+            InputTemplate: |
+              {
+                "source": <source>,
+                "timestamp": <time>,
+                "message": "Scheduled invocation from EventBridge"
+              }
+
+Outputs:
+  ApiFunctionArn:
+    Description: ARN of the Lambda function
+    Value: !GetAtt ApiFunction.Arn
+    
+  ApiFunctionName:
+    Description: Name of the Lambda function
+    Value: !Ref ApiFunction
+    
+  ApiGatewayUrl:
+    Description: URL of the API Gateway endpoint
+    Value: !Sub 'https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/prod/process'
+    
+  ApiGatewayId:
+    Description: ID of the API Gateway
+    Value: !Ref ApiGateway
+    
+  ScheduleRuleName:
+    Description: Name of the EventBridge scheduled rule
+    Value: !Ref ScheduledRule
+    
+  ScheduleRuleArn:
+    Description: ARN of the EventBridge scheduled rule
+    Value: !GetAtt ScheduledRule.Arn
+    
+  TestCommand:
+    Description: Command to manually test the API Gateway endpoint
+    Value: !Sub |
+      curl -X POST https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/prod/process \
+        -H "Content-Type: application/json" \
+        -d '{"source": "manual-test", "timestamp": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"}'
